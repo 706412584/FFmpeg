@@ -330,6 +330,7 @@ static int open_file(AVFormatContext *avf, unsigned fileno)
     ConcatContext *cat = avf->priv_data;
     ConcatFile *file = &cat->files[fileno];
     int ret;
+    AVDictionary *tmp = NULL;
 
     if (cat->avf)
         avformat_close_input(&cat->avf);
@@ -344,8 +345,12 @@ static int open_file(AVFormatContext *avf, unsigned fileno)
     if ((ret = ff_copy_whiteblacklists(cat->avf, avf)) < 0)
         return ret;
 
-    if ((ret = avformat_open_input(&cat->avf, file->url, NULL, NULL)) < 0 ||
-        (ret = avformat_find_stream_info(cat->avf, NULL)) < 0) {
+    if (cat->options)
+        av_dict_copy(&tmp, cat->options, 0);
+    av_dict_set_int(&tmp, "cur_file_no", fileno, 0);
+    ret = avformat_open_input(&cat->avf, file->url, NULL, &tmp);
+    av_dict_free(&tmp);
+    if (ret < 0 || (ret = avformat_find_stream_info(cat->avf, NULL)) < 0) {
         av_log(avf, AV_LOG_ERROR, "Impossible to open '%s'\n", file->url);
         avformat_close_input(&cat->avf);
         return ret;
