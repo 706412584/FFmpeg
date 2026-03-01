@@ -59,6 +59,7 @@ static int ijkdummy_open(URLContext *h, const char *arg, int flags, AVDictionary
     return -1;
 }
 
+int ijkav_register_async_protocol(URLProtocol *protocol, int protocol_size);
 int ijkav_register_async_protocol(URLProtocol *protocol, int protocol_size)
 {
     if (protocol_size != sizeof(URLProtocol)) {
