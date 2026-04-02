@@ -792,6 +792,9 @@ static int parse_playlist(HLSContext *c, const char *url,
 
         pls->finished = 0;
         pls->type = PLS_TYPE_UNSPECIFIED;
+        
+        av_log(c->ctx, AV_LOG_INFO, "[HLS-DISCONTINUITY-FIX] Parsing playlist: %s (prev_segments=%d)\n", 
+               url, prev_n_segments);
     }
     while (!avio_feof(in)) {
         ff_get_chomp_line(in, line, sizeof(line));
@@ -887,7 +890,8 @@ static int parse_playlist(HLSContext *c, const char *url,
             /* ========== HLS DISCONTINUITY support ========== */
             if (pls) {
                 pls->next_segment_discontinuity = 1;
-                av_log(c->ctx, AV_LOG_INFO, "Found #EXT-X-DISCONTINUITY tag\n");
+                av_log(c->ctx, AV_LOG_WARNING, "[HLS-DISCONTINUITY-FIX] Found #EXT-X-DISCONTINUITY tag at segment %d, accumulated_duration=%"PRId64"s\n",
+                       pls->n_segments, pls->accumulated_duration / AV_TIME_BASE);
             }
         } else if (av_strstart(line, "#", NULL)) {
             av_log(c->ctx, AV_LOG_INFO, "Skip ('%s')\n", line);
@@ -966,9 +970,18 @@ static int parse_playlist(HLSContext *c, const char *url,
                 seg->pts_offset_calculated = 0;
                 
                 if (seg->discontinuity) {
-                    av_log(c->ctx, AV_LOG_INFO, 
-                           "Segment %d has DISCONTINUITY, expected_pts=%"PRId64"s\n",
-                           pls->n_segments, seg->expected_pts / AV_TIME_BASE);
+                    av_log(c->ctx, AV_LOG_WARNING, 
+                           "[HLS-DISCONTINUITY-FIX] Segment %d marked as DISCONTINUITY:\n"
+                           "  - URL: %s\n"
+                           "  - Duration: %.2fs\n"
+                           "  - Expected PTS: %"PRId64"s (%.2fmin)\n"
+                           "  - Accumulated duration: %"PRId64"s (%.2fmin)\n",
+                           pls->n_segments, seg->url,
+                           (double)duration / AV_TIME_BASE,
+                           seg->expected_pts / AV_TIME_BASE, 
+                           (double)seg->expected_pts / AV_TIME_BASE / 60.0,
+                           pls->accumulated_duration / AV_TIME_BASE,
+                           (double)pls->accumulated_duration / AV_TIME_BASE / 60.0);
                 }
                 
                 pls->accumulated_duration += duration;
@@ -1010,8 +1023,27 @@ static int parse_playlist(HLSContext *c, const char *url,
         free_segment_dynarray(prev_segments, prev_n_segments);
         av_freep(&prev_segments);
     }
-    if (pls)
+    if (pls) {
         pls->last_load_time = av_gettime_relative();
+        
+        /* Log discontinuity summary */
+        int discontinuity_count = 0;
+        for (int i = 0; i < pls->n_segments; i++) {
+            if (pls->segments[i]->discontinuity) {
+                discontinuity_count++;
+            }
+        }
+        if (discontinuity_count > 0) {
+            av_log(c->ctx, AV_LOG_WARNING, 
+                   "[HLS-DISCONTINUITY-FIX] Playlist parsing complete:\n"
+                   "  - Total segments: %d\n"
+                   "  - Discontinuity segments: %d\n"
+                   "  - Total duration: %"PRId64"s (%.2fmin)\n",
+                   pls->n_segments, discontinuity_count,
+                   pls->accumulated_duration / AV_TIME_BASE,
+                   (double)pls->accumulated_duration / AV_TIME_BASE / 60.0);
+        }
+    }
 
 fail:
     av_free(new_url);
