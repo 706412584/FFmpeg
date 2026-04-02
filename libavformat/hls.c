@@ -2257,7 +2257,7 @@ static int hls_read_packet(AVFormatContext *s, AVPacket *pkt)
                         void *pids;
                         int current_pid;
                         void *epg_stream;
-                        void *pools;
+                        void *pools[32];  /* FIXED: This is an array, not a single pointer */
                         /* Our added fields */
                         int hls_discontinuity_mode;
                         int64_t hls_expected_pts;
