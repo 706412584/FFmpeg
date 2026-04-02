@@ -293,12 +293,22 @@ static int udp_set_multicast_sources(URLContext *h,
             return AVERROR(EINVAL);
         }
 
+#ifdef __ANDROID__
+        /* Android NDK has ip_mreq_source with __u32 instead of struct in_addr */
+        mreqs.imr_multiaddr = ((struct sockaddr_in *)addr)->sin_addr.s_addr;
+        if (local_addr)
+            mreqs.imr_interface = ((struct sockaddr_in *)local_addr)->sin_addr.s_addr;
+        else
+            mreqs.imr_interface = INADDR_ANY;
+        mreqs.imr_sourceaddr = ((struct sockaddr_in *)&sources[i])->sin_addr.s_addr;
+#else
         mreqs.imr_multiaddr.s_addr = ((struct sockaddr_in *)addr)->sin_addr.s_addr;
         if (local_addr)
             mreqs.imr_interface= ((struct sockaddr_in *)local_addr)->sin_addr;
         else
             mreqs.imr_interface.s_addr= INADDR_ANY;
         mreqs.imr_sourceaddr.s_addr = ((struct sockaddr_in *)&sources[i])->sin_addr.s_addr;
+#endif
 
         if (setsockopt(sockfd, IPPROTO_IP,
                        include ? IP_ADD_SOURCE_MEMBERSHIP : IP_BLOCK_SOURCE,
