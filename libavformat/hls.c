@@ -158,6 +158,13 @@ struct playlist {
     /* ========== HLS DISCONTINUITY support ========== */
     int next_segment_discontinuity;  /* 1 if next segment should have discontinuity flag */
     int64_t accumulated_duration;    /* Accumulated duration in AV_TIME_BASE units */
+    
+    /* Timestamp adjuster for discontinuity segments (like ExoPlayer's TimestampAdjuster) */
+    int64_t first_sample_pts;        /* First PTS seen in current discontinuity segment (AV_NOPTS_VALUE if not set) */
+    int64_t expected_segment_pts;    /* Expected PTS for current segment based on m3u8 timeline */
+    int64_t pts_adjustment_offset;   /* Offset to add to all PTS/DTS: expected - first_sample */
+    int pts_adjuster_initialized;    /* 1 if adjuster has been initialized for current segment */
+    int current_segment_is_discontinuity; /* 1 if currently playing segment has discontinuity */
 
     /* Renditions associated with this playlist, if any.
      * Alternative rendition playlists have a single rendition associated
@@ -1370,6 +1377,22 @@ static int open_input(HLSContext *c, struct playlist *pls, struct segment *seg, 
 cleanup:
     av_dict_free(&opts);
     pls->cur_seg_offset = 0;
+    
+    /* [HLS-DISCONTINUITY-FIX] Initialize timestamp adjuster for this segment */
+    if (ret == 0 && seg->discontinuity) {
+        pls->current_segment_is_discontinuity = 1;
+        pls->first_sample_pts = AV_NOPTS_VALUE;
+        pls->expected_segment_pts = seg->expected_pts;
+        pls->pts_adjustment_offset = 0;
+        pls->pts_adjuster_initialized = 0;
+        av_log(pls->parent, AV_LOG_WARNING, 
+               "[HLS-DISCONTINUITY-FIX] Opening discontinuity segment, expected_pts=%"PRId64"s\n",
+               seg->expected_pts / AV_TIME_BASE);
+    } else if (ret == 0) {
+        pls->current_segment_is_discontinuity = 0;
+        pls->pts_adjuster_initialized = 0;
+    }
+    
     return ret;
 }
 
@@ -2203,6 +2226,64 @@ static int hls_read_packet(AVFormatContext *s, AVPacket *pkt)
         /* Make sure we've got one buffered packet from each open playlist
          * stream */
         if (pls->needed && !pls->pkt.data) {
+            /* ========== HLS DISCONTINUITY support (Part 2: Pass info to mpegts demuxer) ========== */
+            if (pls->current_segment_is_discontinuity && pls->ctx && pls->ctx->iformat) {
+                /* Check if sub-demuxer is mpegts */
+                if (strcmp(pls->ctx->iformat->name, "mpegts") == 0 && pls->ctx->priv_data) {
+                    /* Access MpegTSContext through priv_data */
+                    /* We know the layout of MpegTSContext from mpegts.c */
+                    struct MpegTSContext {
+                        const AVClass *class;
+                        AVFormatContext *stream;
+                        int raw_packet_size;
+                        int64_t pos47_full;
+                        int auto_guess;
+                        int mpeg2ts_compute_pcr;
+                        int fix_teletext_pts;
+                        int64_t cur_pcr;
+                        int pcr_incr;
+                        int stop_parse;
+                        AVPacket *pkt;
+                        int64_t last_pos;
+                        int skip_changes;
+                        int skip_clear;
+                        int skip_unknown_pmt;
+                        int scan_all_pmts;
+                        int resync_size;
+                        int merge_pmt_versions;
+                        unsigned int nb_prg;
+                        void *prg;
+                        void *crc_validity;
+                        void *pids;
+                        int current_pid;
+                        void *epg_stream;
+                        void *pools;
+                        /* Our added fields */
+                        int hls_discontinuity_mode;
+                        int64_t hls_expected_pts;
+                        int64_t hls_first_sample_pts;
+                        int64_t hls_pts_adjustment_offset;
+                        int hls_adjuster_initialized;
+                    };
+                    
+                    struct MpegTSContext *ts = (struct MpegTSContext *)pls->ctx->priv_data;
+                    
+                    if (!pls->pts_adjuster_initialized) {
+                        ts->hls_discontinuity_mode = 1;
+                        ts->hls_expected_pts = pls->expected_segment_pts;
+                        ts->hls_adjuster_initialized = 0;
+                        pls->pts_adjuster_initialized = 1;
+                        
+                        av_log(pls->parent, AV_LOG_WARNING,
+                               "[HLS-DISCONTINUITY-FIX] Passed discontinuity info to mpegts demuxer:\n"
+                               "  - Expected PTS: %"PRId64"s (%.2fmin)\n",
+                               pls->expected_segment_pts / AV_TIME_BASE,
+                               (double)pls->expected_segment_pts / AV_TIME_BASE / 60.0);
+                    }
+                }
+            }
+            /* ========== End DISCONTINUITY support ========== */
+            
             while (1) {
                 int64_t ts_diff;
                 AVRational tb;

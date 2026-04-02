@@ -168,6 +168,13 @@ struct MpegTSContext {
 
     AVStream *epg_stream;
     AVBufferPool* pools[32];
+
+    /* ========== HLS DISCONTINUITY support (Part 2: Timestamp Adjuster) ========== */
+    int hls_discontinuity_mode;          /* 1 if currently in a discontinuity segment */
+    int64_t hls_expected_pts;            /* Expected PTS for current segment (in AV_TIME_BASE units) */
+    int64_t hls_first_sample_pts;        /* First PTS seen in current discontinuity segment (AV_NOPTS_VALUE if not set) */
+    int64_t hls_pts_adjustment_offset;   /* Offset to add to all PTS/DTS: expected - first_sample (in stream timebase) */
+    int hls_adjuster_initialized;        /* 1 if adjuster has been initialized for current segment */
 };
 
 #define MPEGTS_OPTIONS \
@@ -986,6 +993,7 @@ static void new_data_packet(const uint8_t *buffer, int len, AVPacket *pkt)
 static int new_pes_packet(PESContext *pes, AVPacket *pkt)
 {
     uint8_t *sd;
+    MpegTSContext *ts = pes->ts;
 
     av_init_packet(pkt);
 
@@ -1006,6 +1014,75 @@ static int new_pes_packet(PESContext *pes, AVPacket *pkt)
         pkt->stream_index = pes->sub_st->index;
     else
         pkt->stream_index = pes->st->index;
+
+    /* ========== HLS DISCONTINUITY support (Part 2: Timestamp Adjuster) ========== */
+    /* Apply timestamp adjustment like ExoPlayer's TimestampAdjuster */
+    if (ts->hls_discontinuity_mode && pes->pts != AV_NOPTS_VALUE) {
+        int64_t original_pts = pes->pts;
+        int64_t original_dts = pes->dts;
+        
+        /* Initialize adjuster on first sample */
+        if (!ts->hls_adjuster_initialized) {
+            AVRational stream_timebase;
+            int64_t expected_pts_stream_tb;
+            
+            /* Get stream timebase */
+            if (pes->st && pes->st->time_base.num > 0 && pes->st->time_base.den > 0) {
+                stream_timebase = pes->st->time_base;
+            } else {
+                /* Default to 90kHz (MPEG-TS standard) */
+                stream_timebase.num = 1;
+                stream_timebase.den = 90000;
+            }
+            
+            /* Convert expected PTS from AV_TIME_BASE to stream timebase */
+            expected_pts_stream_tb = av_rescale_q(ts->hls_expected_pts, 
+                                                   AV_TIME_BASE_Q, 
+                                                   stream_timebase);
+            
+            /* Record first sample PTS */
+            ts->hls_first_sample_pts = original_pts;
+            
+            /* Calculate adjustment offset: expected - first_sample */
+            ts->hls_pts_adjustment_offset = expected_pts_stream_tb - original_pts;
+            ts->hls_adjuster_initialized = 1;
+            
+            av_log(pes->stream, AV_LOG_WARNING, 
+                   "[HLS-DISCONTINUITY-FIX] TimestampAdjuster initialized:\n"
+                   "  - Stream timebase: %d/%d\n"
+                   "  - Expected PTS (AV_TIME_BASE): %"PRId64" (%"PRId64"s)\n"
+                   "  - Expected PTS (stream tb): %"PRId64"\n"
+                   "  - First sample PTS: %"PRId64"\n"
+                   "  - Adjustment offset: %"PRId64" (%.2fs)\n",
+                   stream_timebase.num, stream_timebase.den,
+                   ts->hls_expected_pts, ts->hls_expected_pts / AV_TIME_BASE,
+                   expected_pts_stream_tb,
+                   original_pts,
+                   ts->hls_pts_adjustment_offset,
+                   (double)ts->hls_pts_adjustment_offset * stream_timebase.num / stream_timebase.den);
+        }
+        
+        /* Apply adjustment to PTS */
+        pes->pts = original_pts + ts->hls_pts_adjustment_offset;
+        
+        /* Apply adjustment to DTS if present */
+        if (pes->dts != AV_NOPTS_VALUE) {
+            pes->dts = original_dts + ts->hls_pts_adjustment_offset;
+        }
+        
+        /* Log every 100th packet to avoid spam */
+        static int packet_count = 0;
+        packet_count++;
+        if (packet_count % 100 == 1) {
+            av_log(pes->stream, AV_LOG_INFO, 
+                   "[HLS-DISCONTINUITY-FIX] Timestamp adjusted (packet #%d):\n"
+                   "  - Original PTS: %"PRId64" -> Adjusted PTS: %"PRId64"\n"
+                   "  - Offset: %"PRId64"\n",
+                   packet_count, original_pts, pes->pts, ts->hls_pts_adjustment_offset);
+        }
+    }
+    /* ========== End DISCONTINUITY support ========== */
+
     pkt->pts = pes->pts;
     pkt->dts = pes->dts;
     /* store position of first TS packet of this PES packet */
