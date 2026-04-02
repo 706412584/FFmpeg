@@ -75,6 +75,12 @@ struct segment {
     uint8_t iv[16];
     /* associated Media Initialization Section, treated as a segment */
     struct segment *init_section;
+    
+    /* ========== HLS DISCONTINUITY support ========== */
+    int discontinuity;              /* 1 if this segment has DISCONTINUITY tag */
+    int64_t expected_pts;           /* Expected PTS based on m3u8 cumulative duration (in AV_TIME_BASE units) */
+    int64_t pts_offset;             /* Actual PTS offset from expected (in AV_TIME_BASE units) */
+    int pts_offset_calculated;      /* 1 if pts_offset has been calculated */
 };
 
 struct rendition;
@@ -148,6 +154,10 @@ struct playlist {
     int64_t seek_timestamp;
     int seek_flags;
     int seek_stream_index; /* into subdemuxer stream array */
+
+    /* ========== HLS DISCONTINUITY support ========== */
+    int next_segment_discontinuity;  /* 1 if next segment should have discontinuity flag */
+    int64_t accumulated_duration;    /* Accumulated duration in AV_TIME_BASE units */
 
     /* Renditions associated with this playlist, if any.
      * Alternative rendition playlists have a single rendition associated
@@ -873,6 +883,12 @@ static int parse_playlist(HLSContext *c, const char *url,
             ptr = strchr(ptr, '@');
             if (ptr)
                 seg_offset = strtoll(ptr+1, NULL, 10);
+        } else if (av_strstart(line, "#EXT-X-DISCONTINUITY", NULL)) {
+            /* ========== HLS DISCONTINUITY support ========== */
+            if (pls) {
+                pls->next_segment_discontinuity = 1;
+                av_log(c->ctx, AV_LOG_INFO, "Found #EXT-X-DISCONTINUITY tag\n");
+            }
         } else if (av_strstart(line, "#", NULL)) {
             av_log(c->ctx, AV_LOG_INFO, "Skip ('%s')\n", line);
             continue;
@@ -942,6 +958,23 @@ static int parse_playlist(HLSContext *c, const char *url,
                 }
                 seg->duration = duration;
                 seg->key_type = key_type;
+                
+                /* ========== HLS DISCONTINUITY support ========== */
+                seg->discontinuity = pls->next_segment_discontinuity;
+                seg->expected_pts = pls->accumulated_duration;
+                seg->pts_offset = 0;
+                seg->pts_offset_calculated = 0;
+                
+                if (seg->discontinuity) {
+                    av_log(c->ctx, AV_LOG_INFO, 
+                           "Segment %d has DISCONTINUITY, expected_pts=%"PRId64"s\n",
+                           pls->n_segments, seg->expected_pts / AV_TIME_BASE);
+                }
+                
+                pls->accumulated_duration += duration;
+                pls->next_segment_discontinuity = 0;
+                /* ========== End DISCONTINUITY support ========== */
+                
                 dynarray_add(&pls->segments, &pls->n_segments, seg);
                 is_segment = 0;
 
