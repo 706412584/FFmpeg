@@ -1024,11 +1024,13 @@ static int parse_playlist(HLSContext *c, const char *url,
         av_freep(&prev_segments);
     }
     if (pls) {
+        int discontinuity_count = 0;
+        int i;
+        
         pls->last_load_time = av_gettime_relative();
         
         /* Log discontinuity summary */
-        int discontinuity_count = 0;
-        for (int i = 0; i < pls->n_segments; i++) {
+        for (i = 0; i < pls->n_segments; i++) {
             if (pls->segments[i]->discontinuity) {
                 discontinuity_count++;
             }
